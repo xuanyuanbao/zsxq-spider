@@ -1,4 +1,7 @@
+import random
 import re
+from json import JSONDecodeError
+
 import requests
 import json
 import os
@@ -12,16 +15,18 @@ from urllib.parse import unquote
 import base64
 import time
 
-ZSXQ_ACCESS_TOKEN = '86D82CA0-301A-3797-8528-D09322903A59_6DF24A4ED3558CD4'    # 登录后Cookie中的Token（必须修改）
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:79.0) Gecko/20100101 Firefox/79.0'    # 登录时使用的User-Agent（必须修改）
-GROUP_ID = '452445212848'                         # 知识星球中的小组ID
+from requests import RequestException
+
+ZSXQ_ACCESS_TOKEN = '1856697C-A41D-8F16-E8AB-BC9DB708B400_CDF98095DE9FCFB4'    # 登录后Cookie中的Token（必须修改）
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'    # 登录时使用的User-Agent（必须修改）
+GROUP_ID = '88885284544442'                         # 知识星球中的小组ID
 PDF_FILE_NAME = '电子书.pdf'                       # 生成PDF文件的名字
 DOWLOAD_PICS = True                               # 是否下载图片 True | False 下载会导致程序变慢
 DOWLOAD_COMMENTS = True                           # 是否下载评论
 ONLY_DIGESTS = False                              # True-只精华 | False-全部
 FROM_DATE_TO_DATE = False                         # 按时间区间下载
-EARLY_DATE = '2017-05-25T00:00:00.000+0800'       # 最早时间 当FROM_DATE_TO_DATE=True时生效 为空表示不限制 形如'2017-05-25T00:00:00.000+0800'
-LATE_DATE = '2018-05-25T00:00:00.000+0800'        # 最晚时间 当FROM_DATE_TO_DATE=True时生效 为空表示不限制 形如'2017-05-25T00:00:00.000+0800'
+EARLY_DATE = '2025-02-15T00:00:00.000+0800'       # 最早时间 当FROM_DATE_TO_DATE=True时生效 为空表示不限制 形如'2017-05-25T00:00:00.000+0800'
+LATE_DATE = '2025-02-10T00:00:00.000+0800'        # 最晚时间 当FROM_DATE_TO_DATE=True时生效 为空表示不限制 形如'2017-05-25T00:00:00.000+0800'
 DELETE_PICS_WHEN_DONE = True                      # 运行完毕后是否删除下载的图片
 DELETE_HTML_WHEN_DONE = True                      # 运行完毕后是否删除生成的HTML
 COUNTS_PER_TIME = 30                              # 每次请求加载几个主题 最大可设置为30
@@ -29,6 +34,9 @@ DEBUG = False                                     # DEBUG开关
 DEBUG_NUM = 120                                   # DEBUG时 跑多少条数据后停止 需与COUNTS_PER_TIME结合考虑
 SLEEP_FLAG = True                                 # 请求之间是否SLEEP避免请求过于频繁
 SLEEP_SEC = 2                                     # SLEEP秒数 SLEEP_FLAG=True时生效
+
+path_to_wkhtmltopdf = r'D:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe'  # Windows 示例
+config = pdfkit.configuration(wkhtmltopdf=path_to_wkhtmltopdf)
 
 html_template = """
 <!DOCTYPE html>
@@ -46,137 +54,197 @@ html_template = """
 htmls = []
 num = 0
 
-def get_data(url):
 
-    OVER_DATE_BREAK = False
+def get_json_with_retries(url, retries=3, min_delay=1, max_delay=3):
+    """
+    发起请求并获取 JSON 数据，具有重试机制。
 
-    global htmls, num
-        
+    :param url: 请求的 URL
+    :param retries: 最大重试次数，默认 3 次
+    :param min_delay: 最小重试等待时间（秒），默认 1 秒
+    :param max_delay: 最大重试等待时间（秒），默认 3 秒
+    :return: 请求成功时返回响应数据，失败时返回空字典
+    """
     headers = {
         'Cookie': 'zsxq_access_token=' + ZSXQ_ACCESS_TOKEN,
         'User-Agent': USER_AGENT
     }
-    
-    rsp = requests.get(url, headers=headers)
-    with open('temp.json', 'w', encoding='utf-8') as f: # 将返回数据写入temp.json方便查看
-        f.write(json.dumps(rsp.json(), indent=2, ensure_ascii=False))
-    
-    with open('temp.json', encoding='utf-8') as f:
-        for topic in json.loads(f.read()).get('resp_data').get('topics'):
-            if FROM_DATE_TO_DATE and EARLY_DATE.strip():
-                if topic.get('create_time') < EARLY_DATE.strip():
-                    OVER_DATE_BREAK = True
-                    break
 
-            content = topic.get('question', topic.get('talk', topic.get('task', topic.get('solution'))))
+    # 重试机制
+    for attempt in range(1, retries + 1):
+        try:
+            # 发起请求
+            rsp = requests.get(url, headers=headers)
 
-            anonymous = content.get('anonymous')
-            if anonymous:
-                author = '匿名用户'
-            else:
-                author = content.get('owner').get('name')
+            # 检查 HTTP 状态码是否为 2xx
+            if rsp.status_code != 200:
+                print(f"Attempt {attempt}: HTTP error {rsp.status_code}, retrying...")
+                delay_time = random.uniform(min_delay, max_delay)  # 随机等待时间
+                time.sleep(delay_time)
+                continue
 
-            cretime = (topic.get('create_time')[:23]).replace('T', ' ')
+            # 获取并检查返回的 JSON 数据
+            try:
+                response_data = rsp.json()
+                if response_data.get("succeeded") is True:
+                    return response_data  # 请求成功，返回数据
+                else:
+                    print(f"Attempt {attempt}: 'succeeded' is False, retrying...")
+                    delay_time = random.uniform(min_delay, max_delay)  # 随机等待时间
+                    time.sleep(delay_time)
+                    continue
+            except JSONDecodeError:
+                print(f"Attempt {attempt}: JSON decode error, retrying...")
+                delay_time = random.uniform(min_delay, max_delay)  # 随机等待时间
+                time.sleep(delay_time)
+                continue
 
-            text = content.get('text', '')
-            text = handle_link(text)
-            title = str(num) + '_' + cretime[:16]
-            num += 1
-            if topic.get('digested') == True:
-                title += '_精华'
+        except RequestException as e:
+            print(f"Attempt {attempt}: Request failed with error {e}, retrying...")
+            delay_time = random.uniform(min_delay, max_delay)  # 随机等待时间
+            time.sleep(delay_time)
 
-            if DOWLOAD_PICS and content.get('images'):
-                soup = BeautifulSoup(html_template, 'html.parser')
-                images_index = 0
-                for img in content.get('images'):
-                    url = img.get('large').get('url')
-                    local_url = './images/' + str(num - 1) + '_' + str(images_index) + '.jpg'
-                    images_index += 1
-                    download_image(url, local_url)
-                    #img_tag = soup.new_tag('img', src=local_url)
-                    #直接写入路径可能无法正常将图片写入PDF，此处写入转码后的图片数据
-                    img_tag = soup.new_tag('img', src=encode_image(local_url))
-                    soup.body.append(img_tag)
-                html_img = str(soup)
-                html = html_img.format(title=title, text=text, author=author, cretime=cretime)
-            else:
-                html = html_template.format(title=title, text=text, author=author, cretime=cretime)
+    # 如果重试次数用完仍然失败，返回空字典
+    print(f"All {retries} attempts failed.")
+    return {}
 
-            if topic.get('question'):
-                answer_author = topic.get('answer').get('owner').get('name', '')
-                answer = topic.get('answer').get('text', "")
-                answer = handle_link(answer)
 
-                soup = BeautifulSoup(html, 'html.parser')
-                answer_tag = soup.new_tag('p')
+def get_data(url):
+    OVER_DATE_BREAK = False
+    global htmls, num
 
-                answer = '【' + answer_author + '】 回答：<br>' + answer
-                soup_temp = BeautifulSoup(answer, 'html.parser')
-                answer_tag.append(soup_temp)
+    # headers = {
+    #     'Cookie': 'zsxq_access_token=' + ZSXQ_ACCESS_TOKEN,
+    #     'User-Agent': USER_AGENT
+    # }
 
-                soup.body.append(answer_tag)
-                html = str(soup) 
-			
-            files = content.get('files')
-            if files:
-                files_content = '<i>文件列表(需访问网站下载) :<br>'
-                for f in files:
-                    files_content += f.get('name') + '<br>'
-                files_content += '</i>'
-                soup = BeautifulSoup(html, 'html.parser')
-                files_tag = soup.new_tag('p')
-                soup_temp = BeautifulSoup(files_content, 'html.parser')
-                files_tag.append(soup_temp)
-                soup.body.append(files_tag)
-                html = str(soup)
+    # # 发起请求并获取 JSON 数据
+    # rsp = requests.get(url, headers=headers)
+    # response_data = rsp.json()  # 直接获取响应中的 JSON 数据
+    response_data = get_json_with_retries(url, retries=3, min_delay=1, max_delay=3)
 
-            comments = topic.get('show_comments')
-            if DOWLOAD_COMMENTS and comments:
-                soup = BeautifulSoup(html, 'html.parser')
-                hr_tag = soup.new_tag('hr')
-                soup.body.append(hr_tag)
-                for comment in comments:
-                    comment_str = ''
-                    if comment.get('repliee'):
-                        comment_str = '[' + comment.get('owner').get('name') + ' 回复 ' + comment.get('repliee').get('name') + '] : ' + handle_link(comment.get('text'))
-                    else:
-                        comment_str = '[' + comment.get('owner').get('name') + '] : ' + handle_link(comment.get('text'))
+    # 如果请求失败，立即返回当前数据
+    if not response_data.get('succeeded', False):
+        print(f"Error: {response_data.get('error', 'Unknown error')}")
+        return htmls
 
-                    comment_tag = soup.new_tag('p')
-                    soup_temp = BeautifulSoup(comment_str, 'html.parser')
-                    comment_tag.append(soup_temp)
-                    soup.body.append(comment_tag)
-                html = str(soup)
+    topics = response_data.get('resp_data', {}).get('topics', [])
 
-            htmls.append(html)
+    if not topics:
+        print("No more topics found.")
+        return htmls
 
-    # DEBUG 仅导出部分数据时使用
+    for topic in topics:
+        if FROM_DATE_TO_DATE and EARLY_DATE.strip():
+            if topic.get('create_time') < EARLY_DATE.strip():
+                OVER_DATE_BREAK = True
+                break
+
+        content = topic.get('question', topic.get('talk', topic.get('task', topic.get('solution'))))
+
+        anonymous = content.get('anonymous')
+        author = '匿名用户' if anonymous else content.get('owner', {}).get('name')
+
+        cretime = (topic.get('create_time')[:23]).replace('T', ' ')
+
+        text = content.get('text', '')
+        text = handle_link(text)
+        title = f"{num}_{cretime[:16]}"
+        num += 1
+        if topic.get('digested'):
+            title += '_精华'
+
+        if DOWLOAD_PICS and content.get('images'):
+            soup = BeautifulSoup(html_template, 'html.parser')
+            images_index = 0
+            for img in content.get('images'):
+                url = img.get('large').get('url')
+                local_url = f'./images/{num - 1}_{images_index}.jpg'
+                images_index += 1
+                download_image(url, local_url)
+                img_tag = soup.new_tag('img', src=encode_image(local_url))
+                soup.body.append(img_tag)
+            html_img = str(soup)
+            html = html_img.format(title=title, text=text, author=author, cretime=cretime)
+        else:
+            html = html_template.format(title=title, text=text, author=author, cretime=cretime)
+
+        if topic.get('question'):
+            answer_author = topic.get('answer', {}).get('owner', {}).get('name', '')
+            answer = topic.get('answer', {}).get('text', "")
+            answer = handle_link(answer)
+
+            soup = BeautifulSoup(html, 'html.parser')
+            answer_tag = soup.new_tag('p')
+
+            answer = f"【{answer_author}】 回答：<br>{answer}"
+            soup_temp = BeautifulSoup(answer, 'html.parser')
+            answer_tag.append(soup_temp)
+
+            soup.body.append(answer_tag)
+            html = str(soup)
+
+        files = content.get('files')
+        if files:
+            files_content = '<i>文件列表(需访问网站下载) :<br>'
+            for f in files:
+                files_content += f.get('name') + '<br>'
+            files_content += '</i>'
+            soup = BeautifulSoup(html, 'html.parser')
+            files_tag = soup.new_tag('p')
+            soup_temp = BeautifulSoup(files_content, 'html.parser')
+            files_tag.append(soup_temp)
+            soup.body.append(files_tag)
+            html = str(soup)
+
+        comments = topic.get('show_comments')
+        if DOWLOAD_COMMENTS and comments:
+            soup = BeautifulSoup(html, 'html.parser')
+            hr_tag = soup.new_tag('hr')
+            soup.body.append(hr_tag)
+            for comment in comments:
+                comment_str = ''
+                if comment.get('repliee'):
+                    comment_str = f"[{comment.get('owner').get('name')}] 回复 {comment.get('repliee').get('name')} : {handle_link(comment.get('text'))}"
+                else:
+                    comment_str = f"[{comment.get('owner').get('name')}] : {handle_link(comment.get('text'))}"
+
+                comment_tag = soup.new_tag('p')
+                soup_temp = BeautifulSoup(comment_str, 'html.parser')
+                comment_tag.append(soup_temp)
+                soup.body.append(comment_tag)
+            html = str(soup)
+
+        htmls.append(html)
+
+    # DEBUG：仅导出部分数据时使用
     if DEBUG and num >= DEBUG_NUM:
-       return htmls
+        return htmls
 
     if OVER_DATE_BREAK:
         return htmls
 
-    next_page = rsp.json().get('resp_data').get('topics')
+    # 分页处理：计算下一页的时间戳
+    next_page = response_data.get('resp_data', {}).get('topics', [])
     if next_page:
         create_time = next_page[-1].get('create_time')
         if create_time[20:23] == "000":
-            end_time = create_time[:20]+"999"+create_time[23:]
+            end_time = create_time[:20] + "999" + create_time[23:]
             str_date_time = end_time[:19]
             delta = datetime.timedelta(seconds=1)
             date_time = datetime.datetime.strptime(str_date_time, '%Y-%m-%dT%H:%M:%S')
             date_time = date_time - delta
             str_date_time = date_time.strftime('%Y-%m-%dT%H:%M:%S')
             end_time = str_date_time + end_time[19:]
-        else :
-            res = int(create_time[20:23])-1
-            end_time = create_time[:20]+str(res).zfill(3)+create_time[23:] # zfill 函数补足结果前面的零，始终为3位数
+        else:
+            res = int(create_time[20:23]) - 1
+            end_time = create_time[:20] + str(res).zfill(3) + create_time[23:]
         end_time = quote(end_time)
         if len(end_time) == 33:
             end_time = end_time[:24] + '0' + end_time[24:]
         next_url = start_url + '&end_time=' + end_time
         if SLEEP_FLAG:
-            time.sleep(SLEEP_SEC)
+            time.sleep(SLEEP_SEC)  # 控制请求频率，防止被封锁
         print(next_url)
         get_data(next_url)
 
@@ -252,10 +320,11 @@ def make_pdf(htmls):
 
     pdf_error_flag = False
     try:
-        pdfkit.from_file(html_files, PDF_FILE_NAME, options=options)
+        pdfkit.from_file(html_files, PDF_FILE_NAME, options=options, configuration=config)
     except Exception as e:
         pdf_error_flag = True
         print("电子书生成失败！")
+        print(f"Error: {e}")  # 打印具体的错误信息
         pass
 
     if DELETE_HTML_WHEN_DONE:
@@ -273,14 +342,14 @@ if __name__ == '__main__':
         os.mkdir(images_path)
 
     # 仅精华
-    #start_url = 'https://api.zsxq.com/v1.10/groups/481818518558/topics?scope=digests&count=30'
+    #start_url = 'https://api.zsxq.com/v2/groups/481818518558/topics?scope=digests&count=30'
     # 全部
-    #start_url = 'https://api.zsxq.com/v1.10/groups/481818518558/topics?count=30'
+    #start_url = 'https://api.zsxq.com/v2/groups/481818518558/topics?count=30'
     start_url = ''
     if ONLY_DIGESTS:
-        start_url = 'https://api.zsxq.com/v1.10/groups/' + GROUP_ID + '/topics?scope=digests&count=' + str(COUNTS_PER_TIME)
+        start_url = 'https://api.zsxq.com/v2/groups/' + GROUP_ID + '/topics?scope=digests&count=' + str(COUNTS_PER_TIME)
     else:
-        start_url = 'https://api.zsxq.com/v1.10/groups/' + GROUP_ID + '/topics?count=' + str(COUNTS_PER_TIME)
+        start_url = 'https://api.zsxq.com/v2/groups/' + GROUP_ID + '/topics?count=' + str(COUNTS_PER_TIME)
 
     url = start_url
     if FROM_DATE_TO_DATE and LATE_DATE.strip():
